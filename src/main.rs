@@ -3,29 +3,35 @@ use std::env;
 // Available if you need it!
 // use serde_bencode
 
-fn decode_bencoded_value(encoded_value: &str) -> serde_json::Value {
-    match encoded_value.chars().next().unwrap() {
+fn decode_bencoded_value(input: &str) -> (serde_json::Value, &str) {
+    match input.chars().next().unwrap() {
         '0'..='9' => {
-            // String: 5:hello
-            let (length, rest) = encoded_value.split_once(':').unwrap();
+            let (length, rest) = input.split_once(':').unwrap();
             let length = length.parse::<usize>().unwrap();
 
-            let string = &rest[..length];
-            serde_json::Value::String(string.to_string())
+            let (string, remaining) = rest.split_at(length);
+
+            (serde_json::Value::String(string.to_string()), remaining)
         }
         'i' => {
-            // Integer: i52e or i-52e
-            let number = encoded_value
-                .strip_prefix('i')
-                .unwrap()
-                .strip_suffix('e')
-                .unwrap()
-                .parse::<i64>()
-                .unwrap();
+            let end = input.find('e').unwrap();
+            let number = input[1..end].parse::<i64>().unwrap();
 
-            serde_json::Value::Number(number.into())
+            (serde_json::Value::Number(number.into()), &input[end + 1..])
         }
-        _ => panic!("Unhandled encoded value: {}", encoded_value),
+        'l' => {
+            let mut remaining = &input[1..];
+            let mut values = Vec::new();
+
+            while !remaining.starts_with('e') {
+                let (value, rest) = decode_bencoded_value(remaining);
+                values.push(value);
+                remaining = rest;
+            }
+
+            (serde_json::Value::Array(values), &remaining[1..])
+        }
+        _ => panic!("Unhandled encoded value: {}", input),
     }
 }
 
@@ -40,7 +46,7 @@ fn main() {
 
         // TODO: Uncomment the code below to pass the first stage
         let encoded_value = &args[2];
-        let decoded_value = decode_bencoded_value(encoded_value);
+        let (decoded_value, _) = decode_bencoded_value(encoded_value);
         println!("{}", decoded_value.to_string());
     } else {
         println!("unknown command: {}", args[1])
