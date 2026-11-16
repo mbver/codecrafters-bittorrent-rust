@@ -1,45 +1,97 @@
-use std::env;
+use std::{collections::HashMap, env, fmt, fs};
 
-// Available if you need it!
-// use serde_bencode
+enum BencodeValue {
+    String(Vec<u8>),
+    Integer(i64),
+    List(Vec<BencodeValue>),
+    Dictionary(HashMap<Vec<u8>, BencodeValue>),
+}
 
-fn decode_bencoded_value(input: &str) -> (serde_json::Value, &str) {
-    match input.chars().next().unwrap() {
-        '0'..='9' => {
-            let (length, rest) = input.split_once(':').unwrap();
-            let length = length.parse::<usize>().unwrap();
+impl fmt::Display for BencodeValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BencodeValue::String(bytes) => {
+                write!(f, "{}", String::from_utf8_lossy(bytes))
+            }
+            BencodeValue::Integer(number) => {
+                write!(f, "{}", number)
+            }
+            BencodeValue::List(values) => {
+                write!(f, "[")?;
 
+                for (i, value) in values.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+
+                    write!(f, "{}", value)?;
+                }
+
+                write!(f, "]")
+            }
+            BencodeValue::Dictionary(map) => {
+                write!(f, "{{")?;
+
+                for (i, (key, value)) in map.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+
+                    write!(f, "{}: {}", String::from_utf8_lossy(key), value)?;
+                }
+
+                write!(f, "}}")
+            }
+        }
+    }
+}
+
+fn decode_bencoded_value(input: &[u8]) -> (BencodeValue, &[u8]) {
+    match input[0] {
+        b'0'..=b'9' => {
+            let colon_index = input.iter().position(|&b| b == b':').unwrap();
+
+            let length = std::str::from_utf8(&input[..colon_index])
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+
+            let rest = &input[colon_index + 1..];
             let (string, remaining) = rest.split_at(length);
 
-            (serde_json::Value::String(string.to_string()), remaining)
+            (BencodeValue::String(string.to_vec()), remaining)
         }
-        'i' => {
-            let end = input.find('e').unwrap();
-            let number = input[1..end].parse::<i64>().unwrap();
+        b'i' => {
+            let end = input.iter().position(|&b| b == b'e').unwrap();
 
-            (serde_json::Value::Number(number.into()), &input[end + 1..])
+            let number = std::str::from_utf8(&input[1..end])
+                .unwrap()
+                .parse::<i64>()
+                .unwrap();
+
+            (BencodeValue::Integer(number), &input[end + 1..])
         }
-        'l' => {
+        b'l' => {
             let mut remaining = &input[1..];
             let mut values = Vec::new();
 
-            while !remaining.starts_with('e') {
+            while !remaining.starts_with(b"e") {
                 let (value, rest) = decode_bencoded_value(remaining);
                 values.push(value);
                 remaining = rest;
             }
 
-            (serde_json::Value::Array(values), &remaining[1..])
+            (BencodeValue::List(values), &remaining[1..])
         }
-        'd' => {
+        b'd' => {
             let mut remaining = &input[1..];
-            let mut map = serde_json::Map::new();
+            let mut map = HashMap::new();
 
-            while !remaining.starts_with('e') {
+            while !remaining.starts_with(b"e") {
                 let (key, rest) = decode_bencoded_value(remaining);
                 let (value, rest) = decode_bencoded_value(rest);
 
-                let serde_json::Value::String(key) = key else {
+                let BencodeValue::String(key) = key else {
                     panic!("Dictionary key must be a string");
                 };
 
@@ -47,26 +99,55 @@ fn decode_bencoded_value(input: &str) -> (serde_json::Value, &str) {
                 remaining = rest;
             }
 
-            (serde_json::Value::Object(map), &remaining[1..])
+            (BencodeValue::Dictionary(map), &remaining[1..])
         }
-        _ => panic!("Unhandled encoded value: {}", input),
+        _ => panic!("Unhandled encoded value: {:?}", input),
     }
 }
 
-// Usage: your_program.sh decode "<encoded_value>"
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let command = &args[1];
 
-    if command == "decode" {
-        // You can use print statements as follows for debugging, they'll be visible when running tests.
-        eprintln!("Logs from your program will appear here!");
+    match args[1].as_str() {
+        "decode" => {
+            let encoded = args[2].as_bytes();
+            let (value, _) = decode_bencoded_value(encoded);
 
-        // TODO: Uncomment the code below to pass the first stage
-        let encoded_value = &args[2];
-        let (decoded_value, _) = decode_bencoded_value(encoded_value);
-        println!("{}", decoded_value.to_string());
-    } else {
-        println!("unknown command: {}", args[1])
+            // Temporary: decode command currently supports
+            // displaying simple string and integer values.
+            println!("{}", value);
+        }
+        "info" => {
+            let encoded = fs::read(&args[2]).unwrap();
+            let (value, _) = decode_bencoded_value(&encoded);
+
+            let BencodeValue::Dictionary(root) = value else {
+                panic!("Expected root dictionary");
+            };
+
+            let announce = root.get(b"announce".as_slice()).unwrap();
+
+            let info = root.get(b"info".as_slice()).unwrap();
+
+            let BencodeValue::String(announce) = announce else {
+                panic!("Expected announce string");
+            };
+
+            let BencodeValue::Dictionary(info) = info else {
+                panic!("Expected info dictionary");
+            };
+
+            let length = info.get(b"length".as_slice()).unwrap();
+
+            let BencodeValue::Integer(length) = length else {
+                panic!("Expected length integer");
+            };
+
+            println!("Tracker URL: {}", String::from_utf8_lossy(announce));
+            println!("Length: {}", length);
+        }
+        command => {
+            println!("unknown command: {}", command);
+        }
     }
 }
