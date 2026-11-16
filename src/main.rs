@@ -31,6 +31,24 @@ fn decode_bencoded_value(input: &str) -> (serde_json::Value, &str) {
 
             (serde_json::Value::Array(values), &remaining[1..])
         }
+        'd' => {
+            let mut remaining = &input[1..];
+            let mut map = serde_json::Map::new();
+
+            while !remaining.starts_with('e') {
+                let (key, rest) = decode_bencoded_value(remaining);
+                let (value, rest) = decode_bencoded_value(rest);
+
+                let serde_json::Value::String(key) = key else {
+                    panic!("Dictionary key must be a string");
+                };
+
+                map.insert(key, value);
+                remaining = rest;
+            }
+
+            (serde_json::Value::Object(map), &remaining[1..])
+        }
         _ => panic!("Unhandled encoded value: {}", input),
     }
 }
