@@ -3,18 +3,29 @@ use std::env;
 // Available if you need it!
 // use serde_bencode
 
-#[allow(dead_code)]
 fn decode_bencoded_value(encoded_value: &str) -> serde_json::Value {
-    // If encoded_value starts with a digit, it's a number
-    if encoded_value.chars().next().unwrap().is_ascii_digit() {
-        // Example: "5:hello" -> "hello"
-        let colon_index = encoded_value.find(':').unwrap();
-        let number_string = &encoded_value[..colon_index];
-        let number = number_string.parse::<usize>().unwrap();
-        let string = &encoded_value[colon_index + 1..colon_index + 1 + number];
-        serde_json::Value::String(string.to_string())
-    } else {
-        panic!("Unhandled encoded value: {}", encoded_value)
+    match encoded_value.chars().next().unwrap() {
+        '0'..='9' => {
+            // String: 5:hello
+            let (length, rest) = encoded_value.split_once(':').unwrap();
+            let length = length.parse::<usize>().unwrap();
+
+            let string = &rest[..length];
+            serde_json::Value::String(string.to_string())
+        }
+        'i' => {
+            // Integer: i52e or i-52e
+            let number = encoded_value
+                .strip_prefix('i')
+                .unwrap()
+                .strip_suffix('e')
+                .unwrap()
+                .parse::<i64>()
+                .unwrap();
+
+            serde_json::Value::Number(number.into())
+        }
+        _ => panic!("Unhandled encoded value: {}", encoded_value),
     }
 }
 
