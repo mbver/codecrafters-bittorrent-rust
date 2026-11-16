@@ -46,6 +46,32 @@ impl fmt::Display for BencodeValue {
     }
 }
 
+impl BencodeValue {
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            BencodeValue::String(bytes) => {
+                serde_json::Value::String(String::from_utf8_lossy(bytes).into_owned())
+            }
+            BencodeValue::Integer(number) => {
+                serde_json::json!(number)
+            }
+            BencodeValue::List(values) => {
+                serde_json::Value::Array(values.iter().map(|v| v.to_json()).collect())
+            }
+            BencodeValue::Dictionary(map) => {
+                let mut object = serde_json::Map::new();
+
+                for (key, value) in map {
+                    let key = String::from_utf8_lossy(key).into_owned();
+                    object.insert(key, value.to_json());
+                }
+
+                serde_json::Value::Object(object)
+            }
+        }
+    }
+}
+
 fn decode_bencoded_value(input: &[u8]) -> (BencodeValue, &[u8]) {
     match input[0] {
         b'0'..=b'9' => {
@@ -115,7 +141,7 @@ fn main() {
 
             // Temporary: decode command currently supports
             // displaying simple string and integer values.
-            println!("{}", value);
+            println!("{}", value.to_json());
         }
         "info" => {
             let encoded = fs::read(&args[2]).unwrap();
