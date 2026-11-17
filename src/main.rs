@@ -1,5 +1,7 @@
 use std::{collections::HashMap, env, fmt, fs};
 
+use sha1::{Digest, Sha1};
+
 enum BencodeValue {
     String(Vec<u8>),
     Integer(i64),
@@ -131,6 +133,44 @@ fn decode_bencoded_value(input: &[u8]) -> (BencodeValue, &[u8]) {
     }
 }
 
+fn encode_bencoded_value(value: &BencodeValue, output: &mut Vec<u8>) {
+    match value {
+        BencodeValue::String(bytes) => {
+            output.extend_from_slice(bytes.len().to_string().as_bytes());
+            output.push(b':');
+            output.extend_from_slice(bytes);
+        }
+        BencodeValue::Integer(number) => {
+            output.push(b'i');
+            output.extend_from_slice(number.to_string().as_bytes());
+            output.push(b'e');
+        }
+        BencodeValue::List(values) => {
+            output.push(b'l');
+
+            for value in values {
+                encode_bencoded_value(value, output);
+            }
+
+            output.push(b'e');
+        }
+        BencodeValue::Dictionary(map) => {
+            output.push(b'd');
+
+            let mut keys: Vec<&Vec<u8>> = map.keys().collect();
+            keys.sort();
+
+            for key in keys {
+                encode_bencoded_value(&BencodeValue::String(key.clone()), output);
+
+                encode_bencoded_value(&map[key], output);
+            }
+
+            output.push(b'e');
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -154,6 +194,8 @@ fn main() {
             let announce = root.get(b"announce".as_slice()).unwrap();
 
             let info = root.get(b"info".as_slice()).unwrap();
+            let mut encoded_info = Vec::new();
+            encode_bencoded_value(&info, &mut encoded_info);
 
             let BencodeValue::String(announce) = announce else {
                 panic!("Expected announce string");
@@ -168,9 +210,10 @@ fn main() {
             let BencodeValue::Integer(length) = length else {
                 panic!("Expected length integer");
             };
-
+            let hash = Sha1::digest(&encoded_info);
             println!("Tracker URL: {}", String::from_utf8_lossy(announce));
             println!("Length: {}", length);
+            println!("Info Hash: {:x}", hash);
         }
         command => {
             println!("unknown command: {}", command);
