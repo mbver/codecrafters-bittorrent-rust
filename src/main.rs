@@ -214,6 +214,27 @@ fn main() {
             println!("Tracker URL: {}", String::from_utf8_lossy(announce));
             println!("Length: {}", length);
             println!("Info Hash: {:x}", hash);
+            let piece_length = info.get(b"piece length".as_slice()).unwrap();
+
+            let BencodeValue::Integer(piece_length) = piece_length else {
+                panic!("Expected piece length integer");
+            };
+
+            let pieces = info.get(b"pieces".as_slice()).unwrap();
+
+            let BencodeValue::String(pieces) = pieces else {
+                panic!("Expected pieces string");
+            };
+            println!("Piece Length: {}", piece_length);
+            println!("Piece Hashes:");
+
+            for piece_hash in pieces.chunks(20) {
+                for byte in piece_hash {
+                    print!("{:02x}", byte);
+                }
+
+                println!();
+            }
         }
         command => {
             println!("unknown command: {}", command);
