@@ -1,8 +1,9 @@
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, path::Path};
 
 use crate::{bencode::decode_bencoded_value, client::Client, torrent::Torrent};
 mod bencode;
 mod client;
+mod message;
 mod torrent;
 
 fn main() {
@@ -50,8 +51,20 @@ fn main() {
             let client = Client::new(torrent);
 
             let peer_addr: SocketAddr = args[3].parse().unwrap();
-            let peer_id = client.handshake(peer_addr).unwrap();
-            println!("Peer ID: {}", hex::encode(peer_id));
+            let peer = client.handshake(peer_addr).unwrap();
+            println!("Peer ID: {}", hex::encode(peer.peer_id));
+        }
+        "download_piece" => {
+            let output = Path::new(&args[3]);
+            let torrent = Torrent::from_file(&args[4]);
+            let client = Client::new(torrent);
+
+            let piece_index: usize = args[5].parse().unwrap();
+
+            if let Err(e) = client.download_piece(output, piece_index) {
+                eprintln!("Error: {e}");
+                return;
+            }
         }
         command => {
             println!("unknown command: {}", command);
