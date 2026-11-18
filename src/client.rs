@@ -3,15 +3,13 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use std::{fs, thread};
 use std::{
-    error::Error,
     fs::File,
     io::{self, Read, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream},
     path::Path,
-    sync::Arc,
 };
-use std::{fs, thread};
 
 const BLOCK_SIZE: usize = 16 * 1024;
 const MAX_WORKERS: usize = 8;
@@ -25,7 +23,6 @@ use crate::{
     bencode::{BencodeValue, decode_bencoded_value},
     message::Message,
     torrent::Torrent,
-    workqueue::WorkQueue,
 };
 
 pub struct Client {
@@ -256,9 +253,10 @@ impl Client {
         let piece_count = self.torrent.pieces.len() / 20;
         let next = AtomicUsize::new(0);
         let failure: Mutex<Option<io::Error>> = Mutex::new(None);
-
+        let peer_count = self.peers.lock().unwrap().len();
+        let num_workers = MAX_WORKERS.min(piece_count).min(peer_count);
         thread::scope(|s| {
-            for _ in 0..MAX_WORKERS.min(piece_count) {
+            for _ in 0..num_workers {
                 s.spawn(|| {
                     loop {
                         if failure.lock().unwrap().is_some() {
@@ -328,15 +326,6 @@ fn assemble_file(output: &Path, piece_count: usize) -> io::Result<()> {
 
         fs::remove_file(path)?;
     }
-
-    Ok(())
-}
-
-fn write_temp_piece(output: &Path, piece_index: usize, piece: &[u8]) -> io::Result<()> {
-    let path = temp_piece_path(output, piece_index);
-
-    let mut file = File::create(path)?;
-    file.write_all(piece)?;
 
     Ok(())
 }

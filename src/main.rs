@@ -6,7 +6,6 @@ mod bencode;
 mod client;
 mod message;
 mod torrent;
-mod workqueue;
 
 fn main() -> ExitCode {
     match run() {
