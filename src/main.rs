@@ -107,7 +107,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 6881,
                 0,
                 0,
-                0, // Metadata not downloaded yet; actual file length is unknown.
+                1, // Metadata not downloaded yet; actual file length is unknown.
             )?;
 
             let peer_addr = *peers.first().ok_or("No peers available")?;
