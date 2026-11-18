@@ -1,6 +1,8 @@
 use std::process::ExitCode;
 use std::{env, net::SocketAddr, path::Path};
 
+use reqwest::Url;
+
 use crate::{bencode::decode_bencoded_value, client::Client, torrent::Torrent};
 mod bencode;
 mod client;
@@ -74,6 +76,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let client = Client::new(torrent)?;
 
             client.download_all(output)?;
+        }
+        "magnet_parse" => {
+            let magnet_link = &args[2];
+            let url = Url::parse(magnet_link)?;
+
+            let info_hash = url
+                .query_pairs()
+                .find(|(key, _)| key == "xt")
+                .map(|(_, value)| value);
+
+            let tracker_url = url
+                .query_pairs()
+                .find(|(key, _)| key == "tr")
+                .map(|(_, value)| value);
+
+            println!("Tracker URL: {}", tracker_url.unwrap());
+            println!("Info Hash: {}", info_hash.unwrap());
         }
         command => {
             println!("unknown command: {}", command);
