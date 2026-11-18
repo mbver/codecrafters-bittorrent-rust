@@ -69,7 +69,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             client.download_single_piece(output, piece_index)?;
         }
-        "download_file" => {
+        "download" => {
             let output = Path::new(&args[3]);
             let torrent = Torrent::from_file(&args[4]);
             let client = Client::new(torrent)?;
