@@ -85,14 +85,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .query_pairs()
                 .find(|(key, _)| key == "xt")
                 .map(|(_, value)| value);
-
+            println!("Info Hash: {}", info_hash.unwrap());
             let tracker_url = url
                 .query_pairs()
                 .find(|(key, _)| key == "tr")
                 .map(|(_, value)| value);
-
             println!("Tracker URL: {}", tracker_url.unwrap());
-            println!("Info Hash: {}", info_hash.unwrap());
         }
         command => {
             println!("unknown command: {}", command);
