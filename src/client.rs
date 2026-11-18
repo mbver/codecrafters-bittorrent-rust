@@ -72,97 +72,23 @@ impl Client {
         Ok(client)
     }
     pub fn fetch_peers(&self) -> io::Result<Vec<SocketAddr>> {
-        let info_hash = percent_encode(&self.torrent.info_hash);
-        let client_id = percent_encode(&self.client_id);
-
-        let separator = if self.torrent.announce.contains('?') {
-            '&'
-        } else {
-            '?'
-        };
-
-        let url = format!(
-            "{}{}info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact=1",
-            self.torrent.announce,
-            separator,
-            info_hash,
-            client_id,
+        fetch_peers(
+            &self.torrent.announce,
+            &self.torrent.info_hash,
+            &self.client_id,
             self.port,
             self.uploaded,
             self.downloaded,
             self.left,
-        );
-
-        let body = reqwest::blocking::get(url)
-            .and_then(|r| r.error_for_status())
-            .and_then(|r| r.bytes())
-            .map_err(io::Error::other)?;
-
-        let (value, _) = decode_bencoded_value(&body);
-
-        let BencodeValue::Dictionary(dictionary) = value else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "expected tracker response dictionary",
-            ));
-        };
-
-        let Some(BencodeValue::String(peers)) = dictionary.get(b"peers".as_slice()) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "expected peers string",
-            ));
-        };
-
-        // Compact IPv4 peer format: 4 bytes IP + 2 bytes port.
-        Ok(peers
-            .chunks_exact(6)
-            .map(|peer| {
-                let ip = Ipv4Addr::new(peer[0], peer[1], peer[2], peer[3]);
-                let port = u16::from_be_bytes([peer[4], peer[5]]);
-                SocketAddr::V4(SocketAddrV4::new(ip, port))
-            })
-            .collect())
+        )
     }
-
-    pub fn handshake(&self, peer_addr: SocketAddr) -> io::Result<Peer> {
-        let mut stream = TcpStream::connect(peer_addr)?;
-
-        // Build the 68-byte handshake.
-        let mut request = [0u8; 68];
-        request[0] = 19;
-        request[1..20].copy_from_slice(b"BitTorrent protocol");
-        request[28..48].copy_from_slice(&self.torrent.info_hash);
-        request[48..68].copy_from_slice(&self.client_id);
-
-        stream.write_all(&request)?;
-
-        // Receive and validate the response.
-        let mut response = [0u8; 68];
-        stream.read_exact(&mut response)?;
-
-        if response[0] != 19 || &response[1..20] != b"BitTorrent protocol" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid handshake response",
-            ));
-        }
-
-        if response[28..48] != self.torrent.info_hash {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "info hash mismatch",
-            ));
-        }
-
-        let mut peer_id = [0u8; 20];
-        peer_id.copy_from_slice(&response[48..68]);
-
-        Ok(Peer {
-            peer_id,
-            addr: peer_addr,
-            stream,
-        })
+    pub fn handshake(&self, peer_addr: SocketAddr, extension: bool) -> io::Result<Peer> {
+        handshake(
+            peer_addr,
+            &self.torrent.info_hash,
+            &self.client_id,
+            extension,
+        )
     }
 
     pub fn find_next_active_peer(&self) -> io::Result<Peer> {
@@ -177,7 +103,7 @@ impl Client {
                 addr
             }; // lock dropped here, before the blocking connect/handshake
 
-            match self.handshake(addr) {
+            match self.handshake(addr, false) {
                 Ok(peer) => return Ok(peer),
                 Err(e) => last_error = Some(e),
             }
@@ -420,4 +346,101 @@ fn io_invalid_data(msg: &str) -> io::Error {
 
 fn retry_delay() -> Duration {
     RETRY_DELAY_MIN + (RETRY_DELAY_MAX - RETRY_DELAY_MIN).mul_f64(rand::random::<f64>())
+}
+
+pub fn handshake(
+    peer_addr: SocketAddr,
+    info_hash: &[u8; 20],
+    client_id: &[u8; 20],
+    supports_extensions: bool,
+) -> io::Result<Peer> {
+    let mut stream = TcpStream::connect(peer_addr)?;
+
+    let mut request = [0u8; 68];
+    request[0] = 19;
+    request[1..20].copy_from_slice(b"BitTorrent protocol");
+    request[28..48].copy_from_slice(info_hash);
+    request[48..68].copy_from_slice(client_id);
+
+    if supports_extensions {
+        request[25] = 0x10;
+    }
+
+    stream.write_all(&request)?;
+
+    let mut response = [0u8; 68];
+    stream.read_exact(&mut response)?;
+
+    if response[0] != 19 || &response[1..20] != b"BitTorrent protocol" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid handshake response",
+        ));
+    }
+
+    if response[28..48] != *info_hash {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "info hash mismatch",
+        ));
+    }
+
+    let mut peer_id = [0u8; 20];
+    peer_id.copy_from_slice(&response[48..68]);
+
+    Ok(Peer {
+        peer_id,
+        addr: peer_addr,
+        stream,
+    })
+}
+
+pub fn fetch_peers(
+    tracker_url: &str,
+    info_hash: &[u8; 20],
+    client_id: &[u8; 20],
+    port: u16,
+    uploaded: u64,
+    downloaded: u64,
+    left: u64,
+) -> io::Result<Vec<SocketAddr>> {
+    let info_hash = percent_encode(info_hash);
+    let client_id = percent_encode(client_id);
+
+    let separator = if tracker_url.contains('?') { '&' } else { '?' };
+
+    let url = format!(
+        "{}{}info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact=1",
+        tracker_url, separator, info_hash, client_id, port, uploaded, downloaded, left,
+    );
+
+    let body = reqwest::blocking::get(url)
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.bytes())
+        .map_err(io::Error::other)?;
+
+    let (value, _) = decode_bencoded_value(&body);
+
+    let BencodeValue::Dictionary(dictionary) = value else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected tracker response dictionary",
+        ));
+    };
+
+    let Some(BencodeValue::String(peers)) = dictionary.get(b"peers".as_slice()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected peers string",
+        ));
+    };
+
+    Ok(peers
+        .chunks_exact(6)
+        .map(|peer| {
+            let ip = Ipv4Addr::new(peer[0], peer[1], peer[2], peer[3]);
+            let port = u16::from_be_bytes([peer[4], peer[5]]);
+            SocketAddr::V4(SocketAddrV4::new(ip, port))
+        })
+        .collect())
 }

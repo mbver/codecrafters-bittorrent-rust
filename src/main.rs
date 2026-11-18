@@ -1,8 +1,10 @@
 use std::process::ExitCode;
 use std::{env, net::SocketAddr, path::Path};
 
+use rand::RngExt;
 use reqwest::Url;
 
+use crate::client::{fetch_peers, handshake};
 use crate::{bencode::decode_bencoded_value, client::Client, torrent::Torrent};
 mod bencode;
 mod client;
@@ -58,7 +60,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let client = Client::new(torrent)?;
 
             let peer_addr: SocketAddr = args[3].parse()?;
-            let peer = client.handshake(peer_addr)?;
+            let peer = client.handshake(peer_addr, false)?;
             println!("Peer ID: {}", hex::encode(peer.peer_id));
         }
         "download_piece" => {
@@ -78,27 +80,67 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             client.download_all(output)?;
         }
         "magnet_parse" => {
-            let magnet_link = &args[2];
-            let url = Url::parse(magnet_link)?;
-
-            let info_hash = url
-                .query_pairs()
-                .find(|(key, _)| key == "xt")
-                .map(|(_, value)| value)
-                .unwrap();
-
-            let info_hash = info_hash.strip_prefix("urn:btih:").unwrap();
+            let (info_hash, tracker_url) = parse_magnet(&args[2])?;
 
             println!("Info Hash: {}", info_hash);
-            let tracker_url = url
-                .query_pairs()
-                .find(|(key, _)| key == "tr")
-                .map(|(_, value)| value);
-            println!("Tracker URL: {}", tracker_url.unwrap());
+
+            if let Some(tracker_url) = tracker_url {
+                println!("Tracker URL: {}", tracker_url);
+            }
+        }
+        "magnet_handshake" => {
+            let (info_hash, tracker_url) = parse_magnet(&args[2])?;
+
+            let info_hash: [u8; 20] = hex::decode(info_hash)?
+                .try_into()
+                .map_err(|_| "Invalid info hash length")?;
+
+            let mut client_id = [0u8; 20];
+            rand::rng().fill(&mut client_id);
+
+            let tracker_url = tracker_url.ok_or("Missing tracker URL")?;
+
+            let peers = fetch_peers(
+                &tracker_url,
+                &info_hash,
+                &client_id,
+                6881,
+                0,
+                0,
+                0, // Metadata not downloaded yet; actual file length is unknown.
+            )?;
+
+            let peer_addr = *peers.first().ok_or("No peers available")?;
+
+            let peer = handshake(peer_addr, &info_hash, &client_id, true)?;
+
+            println!("Peer ID: {}", hex::encode(peer.peer_id));
         }
         command => {
             println!("unknown command: {}", command);
         }
     }
     Ok(())
+}
+
+fn parse_magnet(magnet_link: &str) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
+    let url = Url::parse(magnet_link)?;
+
+    let info_hash = url
+        .query_pairs()
+        .find(|(key, _)| key == "xt")
+        .map(|(_, value)| value)
+        .ok_or("Missing xt parameter")?;
+
+    let info_hash = info_hash
+        .strip_prefix("urn:btih:")
+        .ok_or("Invalid xt parameter")?
+        .to_string();
+
+    let tracker_url = url
+        .query_pairs()
+        .find(|(key, _)| key == "tr")
+        .map(|(_, value)| value.to_string());
+
+    Ok((info_hash, tracker_url))
 }
