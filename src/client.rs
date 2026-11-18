@@ -17,7 +17,12 @@ const RETRY_DELAY_MIN: Duration = Duration::from_millis(500);
 const RETRY_DELAY_MAX: Duration = Duration::from_millis(1500);
 const EXTENSION_MESSAGE_ID: u8 = 20;
 const EXTENSION_HANDSHAKE_ID: u8 = 0;
+const METADATA_REQUEST: u8 = 0;
+const METADATA_DATA: i64 = 1;
+const METADATA_REJECT: i64 = 2;
+
 use rand::RngExt;
+use reqwest::Url;
 use sha1::{Digest, Sha1};
 
 use crate::{
@@ -548,4 +553,186 @@ pub fn fetch_peers(
             SocketAddr::V4(SocketAddrV4::new(ip, port))
         })
         .collect())
+}
+
+pub fn parse_magnet(magnet_link: &str) -> io::Result<(String, Option<String>)> {
+    let url = Url::parse(magnet_link).map_err(|_| io_invalid_data("invalid magnet url"))?;
+
+    let info_hash = url
+        .query_pairs()
+        .find(|(key, _)| key == "xt")
+        .map(|(_, value)| value)
+        .ok_or(io_invalid_data("xt key not found"))?;
+
+    let info_hash = info_hash
+        .strip_prefix("urn:btih:")
+        .ok_or(io_invalid_data("invalid xt value"))?
+        .to_string();
+
+    let tracker_url = url
+        .query_pairs()
+        .find(|(key, _)| key == "tr")
+        .map(|(_, value)| value.to_string());
+
+    Ok((info_hash, tracker_url))
+}
+
+pub fn manget_metdata_peer(magnet: &str) -> io::Result<Peer> {
+    let (info_hash, tracker_url) = parse_magnet(magnet)?;
+
+    let info_hash: [u8; 20] = hex::decode(info_hash)
+        .map_err(|_| io_invalid_data("info_hash malformed hex format"))?
+        .try_into()
+        .map_err(|_| io_invalid_data("invalid info_hash length"))?;
+
+    let mut client_id = [0u8; 20];
+    rand::rng().fill(&mut client_id);
+
+    let tracker_url = tracker_url.ok_or(io_invalid_data("Missing tracker URL"))?;
+
+    let peers = fetch_peers(
+        &tracker_url,
+        &info_hash,
+        &client_id,
+        6881,
+        0,
+        0,
+        1, // Metadata not downloaded yet; actual file length is unknown.
+    )?;
+
+    let peer_addr = *peers.first().ok_or(io_invalid_data("No peers available"))?;
+    let extensions = [("ut_metadata", 1)];
+    handshake(peer_addr, &info_hash, &client_id, Some(&extensions))
+}
+
+pub fn request_metadata(peer: &mut Peer) -> io::Result<Vec<u8>> {
+    let extensions = peer
+        .extensions
+        .as_ref()
+        .ok_or_else(|| io_invalid_data("peer does not support extensions"))?;
+
+    let extension_id = *extensions
+        .get("ut_metadata")
+        .ok_or_else(|| io_invalid_data("peer does not support ut_metadata"))?;
+
+    if extension_id == 0 {
+        return Err(io::Error::other("ut_metadata is disabled"));
+    }
+
+    send_metadata_request(peer, extension_id, 0)?;
+    receive_metadata(peer, extension_id, 0)
+}
+/*
+* Length (4 bytes)
+    Message ID: 20
+    Extension ID: peer's ut_metadata ID
+    Bencoded payload:
+        msg_type = 0
+        piece = 0
+*/
+fn send_metadata_request(peer: &mut Peer, extension_id: u8, piece: u32) -> io::Result<()> {
+    // Bencode: d8:msg_typei0e5:piecei0ee
+    let payload = format!("d8:msg_typei{}e5:piecei{}ee", METADATA_REQUEST, piece);
+
+    let length = (2 + payload.len()) as u32;
+
+    peer.stream.write_all(&length.to_be_bytes())?;
+    peer.stream
+        .write_all(&[EXTENSION_MESSAGE_ID, extension_id])?;
+    peer.stream.write_all(payload.as_bytes())?;
+
+    Ok(())
+}
+
+fn receive_metadata(peer: &mut Peer, extension_id: u8, piece: u32) -> io::Result<Vec<u8>> {
+    let message = wait_for(peer, |message| {
+        matches!(
+            message,
+            Message::Extended {
+                extension_id: id,
+                ..
+            } if *id == extension_id
+        )
+    })?;
+
+    let Message::Extended { payload, .. } = message else {
+        unreachable!()
+    };
+
+    let (value, metadata) = decode_bencoded_value(&payload);
+
+    let BencodeValue::Dictionary(header) = value else {
+        return Err(io_invalid_data("expected metadata header dictionary"));
+    };
+
+    let get_integer = |key: &[u8]| -> io::Result<i64> {
+        match header.get(key) {
+            Some(BencodeValue::Integer(value)) => Ok(*value),
+            _ => Err(io_invalid_data("missing or invalid metadata header field")),
+        }
+    };
+
+    let msg_type = get_integer(b"msg_type")?;
+    let response_piece = get_integer(b"piece")?;
+
+    if msg_type == METADATA_REJECT {
+        return Err(io_invalid_data("peer rejected metadata request"));
+    }
+
+    if msg_type != METADATA_DATA {
+        return Err(io_invalid_data("unexpected metadata message type"));
+    }
+
+    if response_piece != i64::from(piece) {
+        return Err(io_invalid_data("unexpected metadata piece index"));
+    }
+
+    let total_size = usize::try_from(get_integer(b"total_size")?)
+        .map_err(|_| io_invalid_data("invalid metadata size"))?;
+
+    if metadata.len() != total_size {
+        return Err(io_invalid_data("metadata size mismatch"));
+    }
+
+    Ok(metadata.to_vec())
+}
+
+pub fn print_magnet_info(magnet: &str) -> io::Result<()> {
+    let mut peer = manget_metdata_peer(magnet)?;
+    let metadata = request_metadata(&mut peer)?;
+
+    let (value, _) = decode_bencoded_value(&metadata);
+
+    let BencodeValue::Dictionary(info) = value else {
+        return Err(io_invalid_data("expected info dictionary"));
+    };
+
+    let length = match info.get(b"length".as_slice()) {
+        Some(BencodeValue::Integer(length)) => *length,
+        _ => return Err(io_invalid_data("missing or invalid length")),
+    };
+
+    let piece_length = match info.get(b"piece length".as_slice()) {
+        Some(BencodeValue::Integer(length)) => *length,
+        _ => return Err(io_invalid_data("missing or invalid piece length")),
+    };
+
+    let pieces = match info.get(b"pieces".as_slice()) {
+        Some(BencodeValue::String(pieces)) => pieces,
+        _ => return Err(io_invalid_data("missing or invalid pieces")),
+    };
+
+    let info_hash = Sha1::digest(&metadata);
+
+    println!("Tracker URL: {}", parse_magnet(magnet)?.1.unwrap());
+    println!("Length: {length}");
+    println!("Info Hash: {}", hex::encode(info_hash));
+    println!("Piece Length: {piece_length}");
+    println!("Piece Hashes:");
+
+    for piece_hash in pieces.chunks(20) {
+        println!("{}", hex::encode(piece_hash));
+    }
+
+    Ok(())
 }
