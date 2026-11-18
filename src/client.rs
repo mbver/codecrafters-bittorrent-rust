@@ -20,6 +20,7 @@ const EXTENSION_HANDSHAKE_ID: u8 = 0;
 const METADATA_REQUEST: u8 = 0;
 const METADATA_DATA: i64 = 1;
 const METADATA_REJECT: i64 = 2;
+const OUR_UT_METADATA_ID: u8 = 1;
 
 use rand::RngExt;
 use reqwest::Url;
@@ -601,7 +602,7 @@ pub fn manget_metdata_peer(magnet: &str) -> io::Result<Peer> {
     )?;
 
     let peer_addr = *peers.first().ok_or(io_invalid_data("No peers available"))?;
-    let extensions = [("ut_metadata", 1)];
+    let extensions = [("ut_metadata", OUR_UT_METADATA_ID)];
     handshake(peer_addr, &info_hash, &client_id, Some(&extensions))
 }
 
@@ -620,7 +621,7 @@ pub fn request_metadata(peer: &mut Peer) -> io::Result<Vec<u8>> {
     }
 
     send_metadata_request(peer, extension_id, 0)?;
-    receive_metadata(peer, extension_id, 0)
+    receive_metadata(peer, 0)
 }
 /*
 * Length (4 bytes)
@@ -644,14 +645,14 @@ fn send_metadata_request(peer: &mut Peer, extension_id: u8, piece: u32) -> io::R
     Ok(())
 }
 
-fn receive_metadata(peer: &mut Peer, extension_id: u8, piece: u32) -> io::Result<Vec<u8>> {
+fn receive_metadata(peer: &mut Peer, piece: u32) -> io::Result<Vec<u8>> {
     let message = wait_for(peer, |message| {
         matches!(
             message,
             Message::Extended {
                 extension_id: id,
                 ..
-            } if *id == extension_id
+            } if *id == OUR_UT_METADATA_ID
         )
     })?;
 
