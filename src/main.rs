@@ -115,6 +115,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             let peer = handshake(peer_addr, &info_hash, &client_id, Some(&extensions))?;
             println!("Peer ID: {}", hex::encode(peer.peer_id));
+            let Some(extensions) = &peer.extensions else {
+                return Ok(());
+            };
+            if let Some(extension_id) = extensions.get("ut_metadata") {
+                println!("Peer Metadata Extension ID: {}", extension_id)
+            }
         }
         command => {
             println!("unknown command: {}", command);
