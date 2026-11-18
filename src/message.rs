@@ -28,6 +28,10 @@ pub enum Message {
         length: u32,
     },
     KeepAlive,
+    Extended {
+        extension_id: u8,
+        payload: Vec<u8>,
+    },
 }
 
 impl Message {
@@ -78,7 +82,10 @@ impl Message {
                 begin: read_u32(&payload[4..8])?,
                 length: read_u32(&payload[8..12])?,
             }),
-
+            20 if !payload.is_empty() => Ok(Message::Extended {
+                extension_id: payload[0],
+                payload: payload[1..].to_vec(),
+            }),
             _ => Err(invalid_message_data()),
         }
     }

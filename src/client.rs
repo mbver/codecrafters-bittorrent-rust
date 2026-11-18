@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,7 +15,8 @@ const BLOCK_SIZE: usize = 16 * 1024;
 const MAX_WORKERS: usize = 8;
 const RETRY_DELAY_MIN: Duration = Duration::from_millis(500);
 const RETRY_DELAY_MAX: Duration = Duration::from_millis(1500);
-
+const EXTENSION_MESSAGE_ID: u8 = 20;
+const EXTENSION_HANDSHAKE_ID: u8 = 0;
 use rand::RngExt;
 use sha1::{Digest, Sha1};
 
@@ -39,6 +40,7 @@ pub struct Peer {
     pub peer_id: [u8; 20],
     pub addr: SocketAddr,
     pub stream: TcpStream,
+    pub extensions: Option<HashMap<String, u8>>,
 }
 
 /// Everything we need to know about a piece before downloading it.
@@ -82,12 +84,16 @@ impl Client {
             self.left,
         )
     }
-    pub fn handshake(&self, peer_addr: SocketAddr, extension: bool) -> io::Result<Peer> {
+    pub fn handshake(
+        &self,
+        peer_addr: SocketAddr,
+        extensions: Option<&[(&str, u8)]>,
+    ) -> io::Result<Peer> {
         handshake(
             peer_addr,
             &self.torrent.info_hash,
             &self.client_id,
-            extension,
+            extensions,
         )
     }
 
@@ -103,7 +109,7 @@ impl Client {
                 addr
             }; // lock dropped here, before the blocking connect/handshake
 
-            match self.handshake(addr, false) {
+            match self.handshake(addr, None) {
                 Ok(peer) => return Ok(peer),
                 Err(e) => last_error = Some(e),
             }
@@ -352,22 +358,24 @@ pub fn handshake(
     peer_addr: SocketAddr,
     info_hash: &[u8; 20],
     client_id: &[u8; 20],
-    supports_extensions: bool,
+    extensions: Option<&[(&str, u8)]>,
 ) -> io::Result<Peer> {
     let mut stream = TcpStream::connect(peer_addr)?;
 
+    // Base handshake
     let mut request = [0u8; 68];
     request[0] = 19;
     request[1..20].copy_from_slice(b"BitTorrent protocol");
     request[28..48].copy_from_slice(info_hash);
     request[48..68].copy_from_slice(client_id);
 
-    if supports_extensions {
+    if extensions.is_some() {
         request[25] = 0x10;
     }
 
     stream.write_all(&request)?;
 
+    // Receive base handshake
     let mut response = [0u8; 68];
     stream.read_exact(&mut response)?;
 
@@ -378,7 +386,7 @@ pub fn handshake(
         ));
     }
 
-    if response[28..48] != *info_hash {
+    if response[28..48] != info_hash[..] {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "info hash mismatch",
@@ -388,11 +396,108 @@ pub fn handshake(
     let mut peer_id = [0u8; 20];
     peer_id.copy_from_slice(&response[48..68]);
 
-    Ok(Peer {
+    let peer_supports_extensions = response[25] & 0x10 != 0;
+
+    let mut peer = Peer {
         peer_id,
         addr: peer_addr,
         stream,
-    })
+        extensions: None,
+    };
+
+    if peer_supports_extensions {
+        if let Some(extensions) = extensions {
+            // Wait for the peer's bitfield.
+            wait_for(&mut peer, |message| {
+                matches!(message, Message::Bitfield { .. })
+            })?;
+
+            // Send our extension handshake.
+            send_extension_handshake(&mut peer, extensions)?;
+
+            // Receive the peer's extension handshake.
+            let message = wait_for(&mut peer, |message| {
+                matches!(
+                    message,
+                    Message::Extended {
+                        extension_id: 0,
+                        ..
+                    }
+                )
+            })?;
+
+            let Message::Extended { payload, .. } = message else {
+                unreachable!()
+            };
+
+            peer.extensions = Some(parse_extension_mapping(&payload)?);
+        }
+    }
+
+    Ok(peer)
+}
+
+fn send_extension_handshake(peer: &mut Peer, extensions: &[(&str, u8)]) -> io::Result<()> {
+    let mut payload = Vec::new();
+
+    // Bencode: d1:md...ee
+    payload.extend_from_slice(b"d1:md");
+
+    for (name, id) in extensions {
+        payload.extend_from_slice(format!("{}:", name.len()).as_bytes());
+        payload.extend_from_slice(name.as_bytes());
+        payload.extend_from_slice(format!("i{}e", id).as_bytes());
+    }
+
+    payload.extend_from_slice(b"ee");
+
+    let length = (payload.len() + 2) as u32;
+
+    peer.stream.write_all(&length.to_be_bytes())?;
+    peer.stream
+        .write_all(&[EXTENSION_MESSAGE_ID, EXTENSION_HANDSHAKE_ID])?;
+    peer.stream.write_all(&payload)?;
+
+    Ok(())
+}
+
+fn parse_extension_mapping(payload: &[u8]) -> io::Result<HashMap<String, u8>> {
+    let (value, _) = decode_bencoded_value(payload);
+
+    let BencodeValue::Dictionary(dictionary) = value else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected extension handshake dictionary",
+        ));
+    };
+
+    let Some(BencodeValue::Dictionary(mapping)) = dictionary.get(b"m".as_slice()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing extension mapping",
+        ));
+    };
+
+    let mut extensions = HashMap::new();
+
+    for (name, value) in mapping {
+        let BencodeValue::Integer(id) = value else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "expected extension ID integer",
+            ));
+        };
+
+        let id = u8::try_from(*id)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid extension ID"))?;
+
+        let name = String::from_utf8(name.clone())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid extension name"))?;
+
+        extensions.insert(name, id);
+    }
+
+    Ok(extensions)
 }
 
 pub fn fetch_peers(

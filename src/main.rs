@@ -60,7 +60,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let client = Client::new(torrent)?;
 
             let peer_addr: SocketAddr = args[3].parse()?;
-            let peer = client.handshake(peer_addr, false)?;
+            let peer = client.handshake(peer_addr, None)?;
             println!("Peer ID: {}", hex::encode(peer.peer_id));
         }
         "download_piece" => {
@@ -111,9 +111,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
 
             let peer_addr = *peers.first().ok_or("No peers available")?;
+            let extensions = [("ut_metadata", 1)];
 
-            let peer = handshake(peer_addr, &info_hash, &client_id, true)?;
-
+            let peer = handshake(peer_addr, &info_hash, &client_id, Some(&extensions))?;
             println!("Peer ID: {}", hex::encode(peer.peer_id));
         }
         command => {
