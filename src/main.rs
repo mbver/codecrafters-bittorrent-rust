@@ -84,8 +84,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let info_hash = url
                 .query_pairs()
                 .find(|(key, _)| key == "xt")
-                .map(|(_, value)| value);
-            println!("Info Hash: {}", info_hash.unwrap());
+                .map(|(_, value)| value)
+                .unwrap();
+
+            let info_hash = info_hash.strip_prefix("urn:btih:").unwrap();
+
+            println!("Info Hash: {}", info_hash);
             let tracker_url = url
                 .query_pairs()
                 .find(|(key, _)| key == "tr")
