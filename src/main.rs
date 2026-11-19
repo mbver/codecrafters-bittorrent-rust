@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 use std::{env, net::SocketAddr, path::Path};
 
-use crate::client::{manget_metdata_peer, parse_magnet, print_magnet_info};
+use crate::client::{manget_metdata_peer, parse_magnet, print_torrent, torrent_from_magnet};
 use crate::{bencode::decode_bencoded_value, client::Client, torrent::Torrent};
 mod bencode;
 mod client;
@@ -97,7 +97,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         "magnet_info" => {
-            print_magnet_info(&args[2])?;
+            let torrent = torrent_from_magnet(&args[2])?;
+            print_torrent(&torrent);
+        }
+        "magnet_download_piece" => {
+            let output = Path::new(&args[3]);
+            let magnet = &args[4];
+            let piece_index = args[5].parse()?;
+
+            let torrent = torrent_from_magnet(magnet)?;
+            let client = Client::new(torrent)?;
+            client.download_single_piece(output, piece_index)?;
+        }
+        "magnet_download" => {
+            let output = Path::new(&args[3]);
+            let magnet = &args[4];
+            let torrent = torrent_from_magnet(magnet)?;
+            let client = Client::new(torrent)?;
+
+            client.download_all(output)?;
         }
         command => {
             println!("unknown command: {}", command);

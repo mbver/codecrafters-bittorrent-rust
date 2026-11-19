@@ -698,7 +698,7 @@ fn receive_metadata(peer: &mut Peer, piece: u32) -> io::Result<Vec<u8>> {
     Ok(metadata.to_vec())
 }
 
-pub fn print_magnet_info(magnet: &str) -> io::Result<()> {
+pub fn torrent_from_magnet(magnet: &str) -> io::Result<Torrent> {
     let mut peer = manget_metdata_peer(magnet)?;
     let metadata = request_metadata(&mut peer)?;
 
@@ -719,21 +719,31 @@ pub fn print_magnet_info(magnet: &str) -> io::Result<()> {
     };
 
     let pieces = match info.get(b"pieces".as_slice()) {
-        Some(BencodeValue::String(pieces)) => pieces,
+        Some(BencodeValue::String(pieces)) => pieces.clone(),
         _ => return Err(io_invalid_data("missing or invalid pieces")),
     };
 
-    let info_hash = Sha1::digest(&metadata);
+    let tracker_url = parse_magnet(magnet)?.1.unwrap();
 
-    println!("Tracker URL: {}", parse_magnet(magnet)?.1.unwrap());
-    println!("Length: {length}");
-    println!("Info Hash: {}", hex::encode(info_hash));
-    println!("Piece Length: {piece_length}");
+    let info_hash = Sha1::digest(&metadata).into();
+
+    Ok(Torrent {
+        announce: tracker_url,
+        length: length as u64,
+        info_hash,
+        piece_length: piece_length as u64,
+        pieces,
+    })
+}
+
+pub fn print_torrent(torrent: &Torrent) {
+    println!("Tracker URL: {}", torrent.announce);
+    println!("Length: {}", torrent.length);
+    println!("Info Hash: {}", hex::encode(torrent.info_hash));
+    println!("Piece Length: {}", torrent.piece_length);
     println!("Piece Hashes:");
 
-    for piece_hash in pieces.chunks(20) {
+    for piece_hash in torrent.pieces.chunks(20) {
         println!("{}", hex::encode(piece_hash));
     }
-
-    Ok(())
 }
